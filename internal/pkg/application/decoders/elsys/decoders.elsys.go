@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/diwise/iot-agent/internal/pkg/application/types"
@@ -115,10 +116,50 @@ func Decoder(ctx context.Context, e types.Event) (types.SensorPayload, error) {
 
 func Converter(ctx context.Context, deviceID string, payload types.SensorPayload, ts time.Time) ([]lwm2m.Lwm2mObject, error) {
 	p := payload.(ElsysPayload)
-	return convertToLwm2mObjects(ctx, deviceID, p, ts), nil
+	voltLevel := p.BatteryLevel()
+	soc := ConvertVoltToPercent(*voltLevel)
+	return convertToLwm2mObjects(ctx, deviceID, p, ts, soc), nil
 }
 
-func convertToLwm2mObjects(ctx context.Context, deviceID string, p ElsysPayload, ts time.Time) []lwm2m.Lwm2mObject {
+type VoltagePercentBattery struct {
+	Voltage float64
+	Percent float64
+}
+
+func ConvertVoltToPercent(mVLevel int) float64 {
+	lookUpTable := []VoltagePercentBattery{
+		{3.3, 7.5},
+		{3.35, 19.1},
+		{3.4, 40.7},
+		{3.45, 66.6},
+		{3.5, 85.3},
+		{3.55, 94.4},
+		{3.6, 98.0},
+	}
+
+	voltage := float64(mVLevel) / 1000.0
+	batteryVolt := math.Round(voltage*100) / 100
+
+	if batteryVolt > 3.6 {
+		return 100.0
+	}
+	if batteryVolt < 3.3 {
+		return 0.0
+	}
+
+	for i := 0; i < len(lookUpTable)-1; i++ {
+		if batteryVolt >= lookUpTable[i].Voltage && batteryVolt <= lookUpTable[i+1].Voltage {
+			v_high, p_high := float64(lookUpTable[i].Voltage), float64(lookUpTable[i].Percent)
+			v_low, p_low := float64(lookUpTable[i+1].Voltage), float64(lookUpTable[i+1].Percent)
+			percentBattery := p_high + (batteryVolt-v_high)*(p_low-p_high)/(v_low-v_high)
+			return percentBattery
+		}
+	}
+
+	return 0.00 //TODO return och felmeddelanden
+}
+
+func convertToLwm2mObjects(ctx context.Context, deviceID string, p ElsysPayload, ts time.Time, soc float64) []lwm2m.Lwm2mObject {
 	objects := []lwm2m.Lwm2mObject{}
 
 	// TODO: better solution for multiple values of same type
@@ -162,9 +203,16 @@ func convertToLwm2mObjects(ctx context.Context, deviceID string, p ElsysPayload,
 	}
 
 	if p.VDD != nil {
-		vdd := int(*p.VDD)
 		d := lwm2m.NewDevice(deviceID, ts)
+		vdd := int(*p.VDD)
 		d.PowerSourceVoltage = &vdd
+		objects = append(objects, d)
+	}
+
+	if soc != 0 {
+		d := lwm2m.NewDevice(deviceID, ts)
+		percentBatteryLeft := int(soc)
+		d.BatteryLevel = &percentBatteryLeft
 		objects = append(objects, d)
 	}
 
