@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"fmt"
@@ -21,88 +22,170 @@ var ErrTimeTooFarOff = fmt.Errorf("sensor time is too far off in the future")
 
 const NoError = 0x00
 
-type QalcosonicVolumePayload struct {
-	CurrentVolume float64
-	Deltas        []QalcosonicDeltaVolume
-	FrameVersion  uint8
-	Messages      []string
-	StatusCode    uint8
-	Temperature   *uint16
-	Timestamp     time.Time
-	Type          string
+type WaterMeterReading struct {
+	Current      float64   `json:"current_volume,omitempty"`
+	LastLogValue uint32    `json:"last_log_value,omitempty"`
+	Volumes      []Value   `json:"volumes,omitempty"`
+	FrameVersion uint8     `json:"frame_version,omitempty"`
+	Messages     []string  `json:"messages,omitempty"`
+	StatusCode   uint8     `json:"status_code,omitempty"`
+	Temperature  *uint16   `json:"temperature,omitempty"`
+	Timestamp    time.Time `json:"timestamp"`
+	Type         string    `json:"type,omitempty"`
 }
 
-type QalcosonicAlarmPayload struct {
-	Timestamp  time.Time
-	StatusCode uint8
-	Messages   []string
+type Alarm struct {
+	Timestamp  time.Time `json:"timestamp"`
+	StatusCode uint8     `json:"status_code,omitempty"`
+	Messages   []string  `json:"messages,omitempty"`
 }
 
-type QalcosonicPayload struct {
-	volume *QalcosonicVolumePayload
-	alarms *QalcosonicAlarmPayload
+type Payload struct {
+	Reading *WaterMeterReading `json:"volume,omitempty"`
+	Alarms  *Alarm             `json:"alarms,omitempty"`
 }
 
-func (a QalcosonicPayload) BatteryLevel() *int {
+func (a Payload) BatteryLevel() *int {
 	return nil
 }
-func (a QalcosonicPayload) Error() (string, []string) {
-	if len(a.volume.Messages) > 0 {
+func (a Payload) Error() (string, []string) {
+	if len(a.Reading.Messages) > 0 {
 		m := []string{}
-		for _, v := range a.volume.Messages {
+		for _, v := range a.Reading.Messages {
 			if v != "No error" {
 				m = append(m, v)
 			}
 		}
 
-		return "", m
+		if a.Reading.StatusCode == NoError {
+			return "0", m
+		}
+
+		return strconv.Itoa(int(a.Reading.StatusCode)), m
 	}
-	return "", []string{}
+	return "0", []string{}
 }
 
-type QalcosonicDeltaVolume struct {
-	CumulatedVolume float64
-	DeltaVolume     float64
-	Timestamp       time.Time
+type Value struct {
+	Volume    float64
+	Delta     float64
+	Timestamp time.Time
 }
 
 func Decoder(ctx context.Context, e types.Event) (types.SensorPayload, error) {
 	var err error
 
 	if e.Payload.FPort != 100 {
-		return QalcosonicPayload{}, fmt.Errorf("unsupported fPort %d", e.Payload.FPort)
+		return Payload{}, fmt.Errorf("unsupported fPort %d", e.Payload.FPort)
 	}
 
-	p, ap, err := decodePayload(ctx, e)
+	p, ap, err := decode(ctx, e)
 	if err != nil {
 		return nil, err
 	}
-	/*
-		if p != nil && p.StatusCode != 0 {
-			err = &types.DecoderErr{
-				Code:      int(p.StatusCode),
-				Messages:  p.Messages,
-				Timestamp: p.Timestamp,
-			}
-		}
-	*/
-	return QalcosonicPayload{
-		volume: p,
-		alarms: ap,
+
+	return Payload{
+		Reading: p,
+		Alarms:  ap,
 	}, err
 }
 
+func DecoderW1h(ctx context.Context, e types.Event) (types.SensorPayload, error) {
+	if e.Payload.FPort != 100 {
+		return Payload{}, fmt.Errorf("unsupported fPort %d", e.Payload.FPort)
+	}
+
+	buf := bytes.NewReader(e.Payload.Data)
+
+	if buf.Len() != 51 && buf.Len() != 52 {
+		return Payload{}, fmt.Errorf("unsupported payload length %d for w1h decoder", buf.Len())
+	}
+
+	p, err := w1h(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	return Payload{
+		Reading: &p,
+	}, nil
+}
+
+func DecoderW1e(ctx context.Context, e types.Event) (types.SensorPayload, error) {
+	if e.Payload.FPort != 100 {
+		return Payload{}, fmt.Errorf("unsupported fPort %d", e.Payload.FPort)
+	}
+
+	buf := bytes.NewReader(e.Payload.Data)
+
+	if buf.Len() != 43 && buf.Len() != 44 && buf.Len() != 45 && buf.Len() != 46 && buf.Len() != 47 {
+		return Payload{}, fmt.Errorf("unsupported payload length %d for w1e decoder", buf.Len())
+	}
+
+	p, err := w1e(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	return Payload{
+		Reading: &p,
+	}, nil
+}
+
+func DecoderW1t(ctx context.Context, e types.Event) (types.SensorPayload, error) {
+	if e.Payload.FPort != 100 {
+		return Payload{}, fmt.Errorf("unsupported fPort %d", e.Payload.FPort)
+	}
+
+	buf := bytes.NewReader(e.Payload.Data)
+
+	switch buf.Len() {
+	case 5:
+		ap, err := alarmPacketDecoder(buf)
+		if err != nil {
+			return nil, err
+		}
+		return Payload{
+			Alarms: &ap,
+		}, nil
+	case 47:
+		p, err := w1t(buf)
+		if err != nil {
+			return nil, err
+		}
+		return Payload{
+			Reading: &p,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported payload length %d for w1t decoder", buf.Len())
+	}
+}
+
 func Converter(ctx context.Context, deviceID string, payload types.SensorPayload, _ time.Time) ([]lwm2m.Lwm2mObject, error) {
-	p := payload.(QalcosonicPayload)
+	p := payload.(Payload)
 	return convert(ctx, deviceID, p)
 }
 
-func convert(ctx context.Context, deviceID string, p QalcosonicPayload) ([]lwm2m.Lwm2mObject, error) {
+func convert(ctx context.Context, deviceID string, p Payload) ([]lwm2m.Lwm2mObject, error) {
+	log := logging.GetFromContext(ctx)
 
-	return convertToLwm2mObjects(ctx, deviceID, p.volume, p.alarms), nil
+	objects := convertToLwm2mObjects(ctx, deviceID, p.Reading, p.Alarms)
+
+	prev := time.Time{}
+
+	for _, obj := range objects {
+		if prev.After(obj.Timestamp()) {
+			log.Warn("out of order timestamps", slog.String("device_id", deviceID), slog.String("object_id", obj.ObjectID()), slog.Time("prev", prev), slog.Time("current", obj.Timestamp()))
+			return nil, fmt.Errorf("out of order timestamps")
+		}
+
+		prev = obj.Timestamp()
+	}
+
+	return objects, nil
 }
 
-func convertToLwm2mObjects(ctx context.Context, deviceID string, p *QalcosonicVolumePayload, ap *QalcosonicAlarmPayload) []lwm2m.Lwm2mObject {
+func convertToLwm2mObjects(ctx context.Context, deviceID string, p *WaterMeterReading, ap *Alarm) []lwm2m.Lwm2mObject {
 	objects := []lwm2m.Lwm2mObject{}
 
 	log := logging.GetFromContext(ctx)
@@ -118,13 +201,13 @@ func convertToLwm2mObjects(ctx context.Context, deviceID string, p *QalcosonicVo
 	}
 
 	if p != nil {
-		for _, d := range p.Deltas {
-			m3 := d.CumulatedVolume * 0.001
-
+		for _, d := range p.Volumes {
 			if d.Timestamp.UTC().After(time.Now().UTC()) {
 				log.Warn("time is in the future!", slog.String("device_id", deviceID), slog.String("type_of_meter", p.Type), slog.Time("timestamp", d.Timestamp))
 				continue
 			}
+
+			m3 := d.Volume * 0.001
 
 			wm := lwm2m.NewWaterMeter(deviceID, m3, d.Timestamp)
 			wm.TypeOfMeter = &p.Type
@@ -136,22 +219,11 @@ func convertToLwm2mObjects(ctx context.Context, deviceID string, p *QalcosonicVo
 
 		if p.Timestamp.UTC().After(time.Now().UTC()) {
 			log.Warn("time is in the future!", slog.String("device_id", deviceID), slog.String("type_of_meter", p.Type), slog.Time("timestamp", p.Timestamp))
-		} else {
-			m3 := p.CurrentVolume * 0.001
-
-			wm := lwm2m.NewWaterMeter(deviceID, m3, p.Timestamp)
-			wm.TypeOfMeter = &p.Type
-			wm.LeakDetected = contains(p.Messages, "Leak")
-			wm.BackFlowDetected = contains(p.Messages, "Backflow")
-
-			objects = append(objects, wm)
 		}
 
 		if p.Temperature != nil {
 			objects = append(objects, lwm2m.NewTemperature(deviceID, float64(*p.Temperature)/100, p.Timestamp))
 		}
-
-		//TODO: create error objects
 	}
 
 	if ap != nil {
@@ -169,7 +241,7 @@ func convertToLwm2mObjects(ctx context.Context, deviceID string, p *QalcosonicVo
 	return objects
 }
 
-func decodePayload(_ context.Context, ue types.Event) (*QalcosonicVolumePayload, *QalcosonicAlarmPayload, error) {
+func decode(_ context.Context, ue types.Event) (*WaterMeterReading, *Alarm, error) {
 	var err error
 
 	buf := bytes.NewReader(ue.Payload.Data)
@@ -178,7 +250,7 @@ func decodePayload(_ context.Context, ue types.Event) (*QalcosonicVolumePayload,
 		return nil, nil, errors.New("decoder not implemented or payload to short")
 	}
 
-	var p QalcosonicVolumePayload
+	var p WaterMeterReading
 
 	switch buf.Len() {
 	case 5:
@@ -206,12 +278,12 @@ func decodePayload(_ context.Context, ue types.Event) (*QalcosonicVolumePayload,
 	return &p, nil, err
 }
 
-func alarmPacketDecoder(buf *bytes.Reader) (QalcosonicAlarmPayload, error) {
+func alarmPacketDecoder(buf *bytes.Reader) (Alarm, error) {
 	var err error
 	var epoch uint32
 	var statusCode uint8
 
-	p := QalcosonicAlarmPayload{}
+	p := Alarm{}
 
 	err = binary.Read(buf, binary.LittleEndian, &epoch)
 	if err != nil {
@@ -231,8 +303,8 @@ func alarmPacketDecoder(buf *bytes.Reader) (QalcosonicAlarmPayload, error) {
 	return p, nil
 }
 
-// Lora Payload (24 hours) “Enhanced”
-func w1e(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
+// Lora Payload (Long) “Extended”
+func w1e(buf *bytes.Reader) (WaterMeterReading, error) {
 	var err error
 
 	var epoch uint32
@@ -242,9 +314,11 @@ func w1e(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 	var volumeAtLogDateTime uint32
 	var sensorTime time.Time
 
-	p := QalcosonicVolumePayload{
-		Deltas: make([]QalcosonicDeltaVolume, 0),
+	p := WaterMeterReading{
+		Volumes: make([]Value, 0),
 	}
+
+	buf.Seek(0, io.SeekStart)
 
 	err = binary.Read(buf, binary.LittleEndian, &epoch)
 	if err == nil {
@@ -270,7 +344,7 @@ func w1e(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 		return p, err
 	}
 
-	p.CurrentVolume = float64(currentVolume)
+	p.Current = float64(currentVolume)
 
 	var ldt time.Time
 	err = binary.Read(buf, binary.LittleEndian, &logDateTime)
@@ -286,19 +360,25 @@ func w1e(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 		ldt = time.Date(y, m, d, hh, 0, 0, 0, time.UTC)
 	}
 
+	if sensorTime.Sub(ldt) > 24*time.Hour {
+		return p, ErrTimeTooFarOff
+	}
+
 	err = binary.Read(buf, binary.LittleEndian, &volumeAtLogDateTime)
 	if err != nil {
 		return p, err
 	}
 
-	p.Deltas = append(p.Deltas, QalcosonicDeltaVolume{
-		Timestamp:       ldt,
-		CumulatedVolume: float64(volumeAtLogDateTime),
-		DeltaVolume:     0.0,
+	p.LastLogValue = volumeAtLogDateTime
+
+	p.Volumes = append(p.Volumes, Value{
+		Timestamp: ldt,
+		Volume:    float64(volumeAtLogDateTime),
+		Delta:     0.0,
 	})
 
-	if d, ok := deltaVolumes(buf, volumeAtLogDateTime, ldt); ok {
-		p.Deltas = append(p.Deltas, d...)
+	if d, ok := decodeDeltaVolumesExtended(buf, volumeAtLogDateTime, ldt); ok {
+		p.Volumes = append(p.Volumes, d...)
 	}
 
 	p.Type = "w1e"
@@ -306,7 +386,8 @@ func w1e(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 	return p, nil
 }
 
-func w1t(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
+// Lora Payload (Long) “Extended” with Temperature
+func w1t(buf *bytes.Reader) (WaterMeterReading, error) {
 	var err error
 
 	var epoch uint32
@@ -316,8 +397,8 @@ func w1t(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 	var logDateTime uint32
 	var volumeAtLogDateTime uint32
 
-	p := QalcosonicVolumePayload{
-		Deltas: make([]QalcosonicDeltaVolume, 0),
+	p := WaterMeterReading{
+		Volumes: make([]Value, 0),
 	}
 
 	buf.Seek(0, io.SeekStart)
@@ -347,7 +428,7 @@ func w1t(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 		return p, err
 	}
 
-	p.CurrentVolume = float64(currentVolume)
+	p.Current = float64(currentVolume)
 
 	err = binary.Read(buf, binary.LittleEndian, &temperature)
 	if err != nil {
@@ -373,14 +454,16 @@ func w1t(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 		return p, err
 	}
 
-	p.Deltas = append(p.Deltas, QalcosonicDeltaVolume{
-		Timestamp:       ldt,
-		CumulatedVolume: float64(volumeAtLogDateTime),
-		DeltaVolume:     0.0,
+	p.LastLogValue = volumeAtLogDateTime
+
+	p.Volumes = append(p.Volumes, Value{
+		Timestamp: ldt,
+		Volume:    float64(volumeAtLogDateTime),
+		Delta:     0.0,
 	})
 
-	if d, ok := deltaVolumes(buf, volumeAtLogDateTime, ldt); ok {
-		p.Deltas = append(p.Deltas, d...)
+	if d, ok := decodeDeltaVolumesExtended(buf, volumeAtLogDateTime, ldt); ok {
+		p.Volumes = append(p.Volumes, d...)
 	}
 
 	p.Type = "w1t"
@@ -388,9 +471,9 @@ func w1t(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 	return p, nil
 }
 
-func deltaVolumes(buf *bytes.Reader, lastLogValue uint32, logDateTime time.Time) ([]QalcosonicDeltaVolume, bool) {
+func decodeDeltaVolumesExtended(buf *bytes.Reader, lastLogValue uint32, logDateTime time.Time) ([]Value, bool) {
 	var deltaVolume uint16
-	deltas := make([]QalcosonicDeltaVolume, 0)
+	deltas := make([]Value, 0)
 
 	t := logDateTime
 	v := lastLogValue
@@ -403,10 +486,10 @@ func deltaVolumes(buf *bytes.Reader, lastLogValue uint32, logDateTime time.Time)
 			return nil, false
 		}
 
-		deltas = append(deltas, QalcosonicDeltaVolume{
-			Timestamp:       t.Add(time.Hour),
-			CumulatedVolume: float64(v + uint32(deltaVolume)),
-			DeltaVolume:     float64(deltaVolume),
+		deltas = append(deltas, Value{
+			Timestamp: t.Add(time.Hour),
+			Volume:    float64(v + uint32(deltaVolume)),
+			Delta:     float64(deltaVolume),
 		})
 
 		t = t.Add(time.Hour)
@@ -416,8 +499,8 @@ func deltaVolumes(buf *bytes.Reader, lastLogValue uint32, logDateTime time.Time)
 	return deltas, true
 }
 
-// Lora Payload (Long) “Extended”
-func w1h(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
+// Lora Payload (Long) "Enhanced"
+func w1h(buf *bytes.Reader) (WaterMeterReading, error) {
 	var err error
 
 	var frameVersion uint8
@@ -425,9 +508,11 @@ func w1h(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 	var statusCode uint8
 	var logVolumeAtOne uint32
 
-	p := QalcosonicVolumePayload{
-		Deltas: make([]QalcosonicDeltaVolume, 0),
+	p := WaterMeterReading{
+		Volumes: make([]Value, 0),
 	}
+
+	buf.Seek(0, io.SeekStart)
 
 	err = binary.Read(buf, binary.LittleEndian, &frameVersion)
 	if err == nil {
@@ -470,33 +555,35 @@ func w1h(buf *bytes.Reader) (QalcosonicVolumePayload, error) {
 		return p, err
 	}
 
-	p.Deltas = append(p.Deltas, QalcosonicDeltaVolume{
-		Timestamp:       logDateTime,
-		CumulatedVolume: vol,
-		DeltaVolume:     0.0,
+	p.LastLogValue = logVolumeAtOne
+
+	p.Volumes = append(p.Volumes, Value{
+		Timestamp: logDateTime,
+		Volume:    vol,
+		Delta:     0.0,
 	})
 
-	if d, ok := deltaVolumesH(buf, vol, logDateTime); ok {
-		p.Deltas = append(p.Deltas, d...)
+	if d, ok := decodeDeltaVolumesEnhanced(buf, vol, logDateTime); ok {
+		p.Volumes = append(p.Volumes, d...)
 	}
 
 	sum := func(v float64) float64 {
 		var sum float64 = v
-		for _, d := range p.Deltas {
-			sum += d.DeltaVolume
+		for _, d := range p.Volumes {
+			sum += d.Delta
 		}
 		return sum
 	}
 
-	p.CurrentVolume = sum(vol)
+	p.Current = sum(vol)
 
 	p.Type = "w1h"
 
 	return p, nil
 }
 
-func deltaVolumesH(buf *bytes.Reader, currentVolume float64, logTime time.Time) ([]QalcosonicDeltaVolume, bool) {
-	p := make([]QalcosonicDeltaVolume, 0)
+func decodeDeltaVolumesEnhanced(buf *bytes.Reader, currentVolume float64, logTime time.Time) ([]Value, bool) {
+	p := make([]Value, 0)
 
 	data, _ := io.ReadAll(buf)
 	data = append(data, 0) // append 0 for last quad
@@ -521,13 +608,14 @@ func deltaVolumesH(buf *bytes.Reader, currentVolume float64, logTime time.Time) 
 	totalVol := currentVolume
 	deltaTime := logTime
 
-	for i := 0; i < 23; i++ {
+	for i := range 23 {
 		totalVol += float64(deltas[i])
 		deltaTime = deltaTime.Add(1 * time.Hour)
-		p = append(p, QalcosonicDeltaVolume{
-			Timestamp:       deltaTime,
-			CumulatedVolume: totalVol,
-			DeltaVolume:     float64(deltas[i]),
+
+		p = append(p, Value{
+			Timestamp: deltaTime,
+			Volume:    totalVol,
+			Delta:     float64(deltas[i]),
 		})
 	}
 

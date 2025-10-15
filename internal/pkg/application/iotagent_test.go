@@ -2,10 +2,14 @@ package application
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/diwise/iot-agent/internal/pkg/application/facades"
+	"github.com/diwise/iot-agent/internal/pkg/application/types"
 	"github.com/diwise/iot-agent/internal/pkg/infrastructure/services/storage"
+	"github.com/diwise/iot-agent/pkg/lwm2m"
 	iotcore "github.com/diwise/iot-core/pkg/messaging/events"
 	"github.com/diwise/iot-device-mgmt/pkg/client"
 	dmctest "github.com/diwise/iot-device-mgmt/pkg/test"
@@ -15,9 +19,9 @@ import (
 )
 
 func TestSenlabTPayload(t *testing.T) {
-	is, dmc, e, ctx := testSetup(t)
+	is, dmc, e, s, ctx := testSetup(t)
 
-	agent := New(dmc, e, storage.NewInMemory(), true, "default")
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{})
 	ue, _ := facades.New("netmore")(ctx, "payload", []byte(senlabT))
 	err := agent.HandleSensorEvent(ctx, ue)
 
@@ -29,9 +33,9 @@ func TestSenlabTPayload(t *testing.T) {
 }
 
 func TestStripsPayload(t *testing.T) {
-	is, dmc, e, ctx := testSetup(t)
+	is, dmc, e, s, ctx := testSetup(t)
 
-	agent := New(dmc, e, storage.NewInMemory(), true, "default").(*app)
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{})
 	ue, _ := facades.New("netmore")(ctx, "payload", []byte(stripsPayload))
 	err := agent.HandleSensorEvent(ctx, ue)
 
@@ -43,9 +47,9 @@ func TestStripsPayload(t *testing.T) {
 }
 
 func TestElt2HpPayload(t *testing.T) {
-	is, dmc, e, ctx := testSetup(t)
+	is, dmc, e, s, ctx := testSetup(t)
 
-	agent := New(dmc, e, storage.NewInMemory(), true, "default").(*app)
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{}).(*app)
 	ue, _ := facades.New("netmore")(ctx, "payload", []byte(elt2hp))
 	err := agent.HandleSensorEvent(ctx, ue)
 
@@ -57,9 +61,9 @@ func TestElt2HpPayload(t *testing.T) {
 }
 
 func TestElsysPayload(t *testing.T) {
-	is, dmc, e, ctx := testSetup(t)
+	is, dmc, e, s, ctx := testSetup(t)
 
-	agent := New(dmc, e, storage.NewInMemory(), true, "default").(*app)
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{}).(*app)
 	ue, _ := facades.New("servanet")(ctx, "up", []byte(elsys))
 	err := agent.HandleSensorEvent(ctx, ue)
 
@@ -71,9 +75,9 @@ func TestElsysPayload(t *testing.T) {
 }
 
 func TestElsysDigital1Payload(t *testing.T) {
-	is, dmc, e, ctx := testSetup(t)
+	is, dmc, e, s, ctx := testSetup(t)
 
-	agent := New(dmc, e, storage.NewInMemory(), true, "default").(*app)
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{}).(*app)
 	ue, _ := facades.New("servanet")(ctx, "up", []byte(`
 	{
 		"data": "DQEaAA==",
@@ -93,9 +97,9 @@ func TestElsysDigital1Payload(t *testing.T) {
 }
 
 func TestErsPayload(t *testing.T) {
-	is, dmc, e, ctx := testSetup(t)
+	is, dmc, e, s, ctx := testSetup(t)
 
-	agent := New(dmc, e, storage.NewInMemory(), true, "default").(*app)
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{}).(*app)
 	ue, _ := facades.New("servanet")(ctx, "up", []byte(ers))
 	err := agent.HandleSensorEvent(ctx, ue)
 
@@ -113,9 +117,9 @@ func TestErsPayload(t *testing.T) {
 }
 
 func TestPresencePayload(t *testing.T) {
-	is, dmc, e, ctx := testSetup(t)
+	is, dmc, e, s, ctx := testSetup(t)
 
-	agent := New(dmc, e, storage.NewInMemory(), true, "default").(*app)
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{}).(*app)
 	ue, _ := facades.New("servanet")(ctx, "up", []byte(livboj))
 	err := agent.HandleSensorEvent(ctx, ue)
 
@@ -127,9 +131,9 @@ func TestPresencePayload(t *testing.T) {
 }
 
 func TestDistancePayload(t *testing.T) {
-	is, dmc, e, ctx := testSetup(t)
+	is, dmc, e, s, ctx := testSetup(t)
 
-	agent := New(dmc, e, storage.NewInMemory(), true, "default").(*app)
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{}).(*app)
 	ue, _ := facades.New("netmore")(ctx, "payload", []byte(vegapuls))
 	err := agent.HandleSensorEvent(ctx, ue)
 
@@ -138,6 +142,44 @@ func TestDistancePayload(t *testing.T) {
 
 	pack := getPackFromSendCalls(e, 0)
 	is.Equal(*pack[1].Value, 1.80952)
+}
+
+func TestQalcosonic(t *testing.T) {
+	is, dmc, e, s, ctx := testSetup(t)
+
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{}).(*app)
+	ue, _ := facades.New("netmore")(ctx, "payload", qalcosonic_templ("0ea0355d302935000054c0345de7290000b800b900b800b800b800b900b800b800b800b800b800b800b900b900b900"))
+	err := agent.HandleSensorEvent(ctx, ue)
+	is.NoErr(err)
+	is.True(len(e.SendCommandToCalls()) > 0)
+
+	pack := getPackFromSendCalls(e, 0)
+	is.Equal(*pack[1].Value, 10.727)
+}
+
+func TestQalcosonicInvalidPayload(t *testing.T) {
+	is, dmc, e, s, ctx := testSetup(t)
+	agent := New(dmc, e, s, true, "default", &DeviceProfileConfigs{}).(*app)
+
+	run := func(h string) error {
+		ue, _ := facades.New("netmore")(ctx, "payload", qalcosonic_templ(h))
+		err := agent.HandleSensorEvent(ctx, ue)
+		return err
+	}
+
+	var errs []error
+	payloads := []string{
+		"015B04B668006C3C9B007B801B0015140DED0450614A740E4746D8C03E6C11DD8386214D1C16E904FEF023A003134198B01500",
+		"01DB93B568006C3C9B007B801B0015140DED0450614A740E4746D8C03E6C11DD8386214D1C16E904FEF023A003134198B01500",
+		"D6FDD0680071160C00A006102FD068D50A0C004602630146014B0136000B000B0011001900100016005E0187013E01",
+		"1455D06800560F0C00AB065086CF6829F40B003800ED0012027B02FF016C020F022E029F0178013E02FD0246026301",
+	}
+
+	for _, p := range payloads {
+		errs = append(errs, run(p))
+	}
+
+	is.NoErr(errors.Join(errs...))
 }
 
 func TestDeterministicGuid(t *testing.T) {
@@ -154,7 +196,7 @@ func getPackFromSendCalls(e *messaging.MsgContextMock, i int) senml.Pack {
 	return m.Pack()
 }
 
-func testSetup(t *testing.T) (*is.I, *dmctest.DeviceManagementClientMock, *messaging.MsgContextMock, context.Context) {
+func testSetup(t *testing.T) (*is.I, *dmctest.DeviceManagementClientMock, *messaging.MsgContextMock, storage.Storage, context.Context) {
 	is := is.New(t)
 	dmc := &dmctest.DeviceManagementClientMock{
 		FindDeviceFromDevEUIFunc: func(ctx context.Context, devEUI string) (client.Device, error) {
@@ -162,25 +204,32 @@ func testSetup(t *testing.T) (*is.I, *dmctest.DeviceManagementClientMock, *messa
 			types := []string{"urn:oma:lwm2m:ext:3303"}
 			sensorType := "Elsys_Codec"
 
-			if devEUI == "70b3d580a010f260" {
+			switch devEUI {
+			case "70b3d580a010f260":
 				sensorType = "tem_lab_14ns"
-			} else if devEUI == "70b3d52c00019193" {
+			case "70b3d52c00019193":
 				sensorType = "strips_lora_ms_h"
-			} else if devEUI == "a81758fffe05e6fb" {
+			case "a81758fffe05e6fb":
 				sensorType = "Elsys_Codec"
 				types = []string{"urn:oma:lwm2m:ext:3303", "urn:oma:lwm2m:ext:3428"}
-			} else if devEUI == "aabbccddee" {
+			case "aabbccddee":
 				sensorType = "Elsys_Codec"
 				types = []string{"urn:oma:lwm2m:ext:3200"}
-			} else if devEUI == "3489573498573459" {
+			case "3489573498573459":
 				sensorType = "presence"
 				types = []string{"urn:oma:lwm2m:ext:3302"}
-			} else if devEUI == "a81758fffe09ec03" {
+			case "a81758fffe09ec03":
 				sensorType = "elt_2_hp"
 				types = []string{"urn:oma:lwm2m:ext:3200"}
-			} else if devEUI == "04c46100008f70e4" {
+			case "04c46100008f70e4":
 				sensorType = "vegapuls_air_41"
 				types = []string{"urn:oma:lwm2m:ext:3330"}
+			case "116c52b4274f":
+				sensorType = "qalcosonic"
+				types = []string{"urn:oma:lwm2m:ext:3424"}
+			default:
+				types = []string{"urn:oma:lwm2m:ext:3303"}
+				sensorType = "Elsys_Codec"
 			}
 
 			res := &dmctest.DeviceMock{
@@ -200,7 +249,16 @@ func testSetup(t *testing.T) (*is.I, *dmctest.DeviceManagementClientMock, *messa
 		SendCommandToFunc:  func(ctx context.Context, command messaging.Command, key string) error { return nil },
 	}
 
-	return is, dmc, e, context.Background()
+	s := &storage.StorageMock{
+		CloseFunc: func() error {
+			return nil
+		},
+		SaveFunc: func(ctx context.Context, se types.Event, device client.Device, payload types.SensorPayload, objects []lwm2m.Lwm2mObject, err error) error {
+			return nil
+		},
+	}
+
+	return is, dmc, e, s, context.Background()
 }
 
 const vegapuls string = `[{
@@ -336,3 +394,35 @@ const livboj string = `
         "prevHistSeqNr": 65535
     }
 }`
+
+func qalcosonic_templ(h string) []byte {
+	return []byte(fmt.Sprintf(`
+[{
+  "devEui": "116c52b4274f",
+  "sensorType": "qalcosonic_w1e",
+  "messageType": "payload",
+  "timestamp": "2022-08-25T07:35:21.834484Z",
+  "Payload": "%s",
+  "fCntUp": 1490,
+  "toa": null,
+  "freq": 867900000,
+  "batteryLevel": "255",
+  "ack": false,
+  "spreadingFactor": "8",
+  "rssi": "-115",
+  "snr": "-1.8",
+  "gatewayIdentifier": "000",
+  "fPort": "100",
+  "tags": {
+  },
+  "gateways": [
+    {
+      "rssi": "-115",
+      "snr": "-1.8",
+      "gatewayIdentifier": "000",
+      "antenna": 0
+    }
+  ]
+}]
+`, h))
+}
