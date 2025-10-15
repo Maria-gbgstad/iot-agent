@@ -108,8 +108,7 @@ func (a *app) HandleSensorEvent(ctx context.Context, se types.Event) error {
 		}
 
 		payload, err = decoder(ctx, se)
-		batterilevel := payload.BatteryLevel() //TODO
-		fmt.Println(batterilevel)
+
 		if err != nil {
 			log.Error("could not decode payload", "err", err.Error())
 			return err

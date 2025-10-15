@@ -47,9 +47,9 @@ func (a ElsysPayload) BatteryLevel() *int {
 		bat := int(*a.VDD)
 		return &bat
 	}
-
 	return nil
 }
+
 func (a ElsysPayload) Error() (string, []string) {
 	return "", []string{}
 }
@@ -116,8 +116,8 @@ func Decoder(ctx context.Context, e types.Event) (types.SensorPayload, error) {
 
 func Converter(ctx context.Context, deviceID string, payload types.SensorPayload, ts time.Time) ([]lwm2m.Lwm2mObject, error) {
 	p := payload.(ElsysPayload)
-	voltLevel := p.BatteryLevel()
-	soc := ConvertVoltToPercent(*voltLevel)
+	mVoltageLevel := p.BatteryLevel() // onödigt till int och koll om värde finns
+	soc := ConvertVoltToPercent(*mVoltageLevel)
 	return convertToLwm2mObjects(ctx, deviceID, p, ts, soc), nil
 }
 
@@ -127,36 +127,25 @@ type VoltagePercentBattery struct {
 }
 
 func ConvertVoltToPercent(mVLevel int) float64 {
-	lookUpTable := []VoltagePercentBattery{
-		{3.3, 7.5},
-		{3.35, 19.1},
-		{3.4, 40.7},
-		{3.45, 66.6},
-		{3.5, 85.3},
-		{3.55, 94.4},
-		{3.6, 98.0},
-	}
+	halfVoltageCapacity := 3.4177
+	calibrationFactor := 21.347
 
 	voltage := float64(mVLevel) / 1000.0
 	batteryVolt := math.Round(voltage*100) / 100
 
-	if batteryVolt > 3.6 {
-		return 100.0
+	if batteryVolt >= 3.6 {
+		batteryFull := 100.0
+		return batteryFull
 	}
+
 	if batteryVolt < 3.3 {
-		return 0.0
+		batteryEmpty := 0.0
+		return batteryEmpty
 	}
 
-	for i := 0; i < len(lookUpTable)-1; i++ {
-		if batteryVolt >= lookUpTable[i].Voltage && batteryVolt <= lookUpTable[i+1].Voltage {
-			v_high, p_high := float64(lookUpTable[i].Voltage), float64(lookUpTable[i].Percent)
-			v_low, p_low := float64(lookUpTable[i+1].Voltage), float64(lookUpTable[i+1].Percent)
-			percentBattery := p_high + (batteryVolt-v_high)*(p_low-p_high)/(v_low-v_high)
-			return percentBattery
-		}
-	}
-
-	return 0.00 //TODO return och felmeddelanden
+	soc := 100 * (1 / (1 + math.Exp(-calibrationFactor*(batteryVolt-halfVoltageCapacity))))
+	roundedSoc := math.Round(soc*100) / 100 //göra en egen funktion avrundar två gånger i samma funktion
+	return roundedSoc
 }
 
 func convertToLwm2mObjects(ctx context.Context, deviceID string, p ElsysPayload, ts time.Time, soc float64) []lwm2m.Lwm2mObject {
@@ -209,7 +198,7 @@ func convertToLwm2mObjects(ctx context.Context, deviceID string, p ElsysPayload,
 		objects = append(objects, d)
 	}
 
-	if soc != 0 {
+	if soc != nil { // soc behandlas som vdd? bli device?
 		d := lwm2m.NewDevice(deviceID, ts)
 		percentBatteryLeft := int(soc)
 		d.BatteryLevel = &percentBatteryLeft
