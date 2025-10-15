@@ -198,7 +198,7 @@ func convertToLwm2mObjects(ctx context.Context, deviceID string, p ElsysPayload,
 		objects = append(objects, d)
 	}
 
-	if soc != nil { // soc behandlas som vdd? bli device?
+	if soc != nil nil { // soc behandlas som vdd? bli device?
 		d := lwm2m.NewDevice(deviceID, ts)
 		percentBatteryLeft := int(soc)
 		d.BatteryLevel = &percentBatteryLeft
